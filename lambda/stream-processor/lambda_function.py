@@ -1,6 +1,7 @@
 import json
 import boto3
 import base64
+import time
 from datetime import datetime
 from decimal import Decimal
 
@@ -52,54 +53,98 @@ def save_raw_event(event_data):
         raise
 
 
-def update_analytics(event_data):
+def update_metric(metric_type, time_window, increment):
     """
-    Update aggregated analytics in DynamoDB analytics table
+    Update or create a metric in the analytics table
     
     Args:
-        event_data (dict): The event to aggregate
+        metric_type (str): Type of metric (e.g., "product_view_count", "category_Electronics")
+        time_window (str): Time period (e.g., "2025-11-14" or "2025-11-14-14")
+        increment (float): Amount to add to the metric
     """
     try:
-        # Get date from timestamp
-        timestamp = event_data['timestamp']
-        date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+        # Convert to Decimal for DynamoDB
+        increment_decimal = Decimal(str(increment))
         
-        event_type = event_data['event_type']
-        
-        # Update count for this event type on this date
-        metric_type = f"{event_type}_count"
-        time_window = date
-        
-        # Increment the counter (atomic operation)
+        # Use DynamoDB's atomic counter
+        # If item doesn't exist, it creates it with event_count=increment
+        # If item exists, it adds increment to existing event_count
         analytics_table.update_item(
             Key={
                 'metric_type': metric_type,
                 'time_window': time_window
             },
-            UpdateExpression='ADD event_count :inc SET last_updated = :now',
+            UpdateExpression='ADD event_count :increment SET last_updated = :timestamp',
             ExpressionAttributeValues={
-                ':inc': 1,
-                ':now': int(datetime.now().timestamp())
+                ':increment': increment_decimal,
+                ':timestamp': Decimal(str(int(time.time())))
             }
         )
         
-        print(f"✓ Updated analytics: {metric_type} for {time_window}")
+    except Exception as e:
+        print(f"✗ Error updating metric {metric_type}/{time_window}: {str(e)}")
+        raise
+
+
+def update_analytics(event):
+    """
+    Update aggregated analytics in DynamoDB
+    
+    Args:
+        event (dict): Event data to aggregate
+    """
+    try:
+        # Get date for time window (YYYY-MM-DD format)
+        event_date = datetime.fromtimestamp(event['timestamp']).strftime('%Y-%m-%d')
         
-        # If it's a purchase, also track revenue
-        if event_type == 'purchase' and 'total_amount' in event_data:
-            revenue_metric = 'purchase_revenue'
-            analytics_table.update_item(
-                Key={
-                    'metric_type': revenue_metric,
-                    'time_window': time_window
-                },
-                UpdateExpression='ADD total_revenue :amount SET last_updated = :now',
-                ExpressionAttributeValues={
-                    ':amount': Decimal(str(event_data['total_amount'])),
-                    ':now': int(datetime.now().timestamp())
-                }
+        # Get hour for hourly metrics (YYYY-MM-DD-HH format)
+        event_hour = datetime.fromtimestamp(event['timestamp']).strftime('%Y-%m-%d-%H')
+        
+        # Get event type (e.g., "product_view", "add_to_cart")
+        event_type = event['event_type']
+        
+        # Update daily event type counter
+        update_metric(
+            metric_type=f"{event_type}_count",
+            time_window=event_date,
+            increment=1
+        )
+        
+        # Update hourly event type counter
+        update_metric(
+            metric_type=f"{event_type}_hourly_count",
+            time_window=event_hour,
+            increment=1
+        )
+        
+        # Update category metrics (daily)
+        category = event.get('product_category')
+        if category:
+            update_metric(
+                metric_type=f"category_{category}",
+                time_window=event_date,
+                increment=1
             )
-            print(f"✓ Updated revenue: ${event_data['total_amount']} for {time_window}")
+        
+        # Update product-specific metrics (daily)
+        product_id = event.get('product_id')
+        if product_id:
+            update_metric(
+                metric_type=f"product_{product_id}",
+                time_window=event_date,
+                increment=1
+            )
+        
+        # If it's a purchase, track revenue
+        if event_type == 'purchase':
+            revenue = event.get('total_amount', event.get('product_price', 0))
+            update_metric(
+                metric_type='purchase_revenue',
+                time_window=event_date,
+                increment=float(revenue)
+            )
+        
+        print(f"✓ Updated analytics for: {event_type} - {event.get('product_name')}")
         
     except Exception as e:
         print(f"✗ Error updating analytics: {str(e)}")
