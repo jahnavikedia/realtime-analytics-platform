@@ -77,33 +77,36 @@ def get_metric(metric_type, time_window=None):
 
 def get_dashboard_summary():
     """
-    Get summary of key metrics for today
+    Get summary of key metrics across all dates
     
     Returns:
         dict: Summary of all key metrics
     """
     try:
-        # Get today's date
-        today = datetime.now().strftime('%Y-%m-%d')
-        
         # Key metrics to fetch
         metrics = ['product_view_count', 'add_to_cart_count', 'purchase_count', 'remove_from_cart_count']
         
         summary = {
-            'date': today,
+            'total_events': 0,
             'metrics': {}
         }
         
-        # Fetch each metric
+        # Fetch each metric across ALL dates and sum them
         for metric in metrics:
-            result = get_metric(metric, today)
-            if result['success'] and 'data' in result:
+            response = analytics_table.query(
+                KeyConditionExpression='metric_type = :mt',
+                ExpressionAttributeValues={
+                    ':mt': metric
+                }
+            )
+            
+            # Sum all counts across all dates
+            total = sum(item.get('event_count', 0) for item in response.get('Items', []))
+            
             # Remove "_count" suffix for cleaner response
-                clean_name = metric.replace('_count', '')
-                summary['metrics'][clean_name] = result['data'].get('event_count', 0)
-            else:
-                clean_name = metric.replace('_count', '')
-                summary['metrics'][clean_name] = 0
+            clean_name = metric.replace('_count', '')
+            summary['metrics'][clean_name] = float(total)
+            summary['total_events'] += float(total)
         
         # Calculate conversion rate (purchases / views)
         views = summary['metrics'].get('product_view', 0)
@@ -133,43 +136,37 @@ def get_dashboard_summary():
             'message': f'Error: {str(e)}'
         }
 
-
 def get_category_breakdown(date=None):
     """
-    Get breakdown of views by category
+    Get breakdown of views by category across all dates
     
     Args:
-        date (str): Optional specific date
+        date (str): Optional specific date (ignored for now, shows all-time)
         
     Returns:
         dict: Category metrics
     """
     try:
-        if not date:
-            date = datetime.now().strftime('%Y-%m-%d')
-        
         categories = ['Electronics', 'Sports', 'Home']
         breakdown = {
-            'date': date,
+            'all_time': True,
             'categories': {}
         }
         
         for category in categories:
             metric_type = f'category_{category}'
             
-            # Get the metric data
-            response = analytics_table.get_item(
-                Key={
-                    'metric_type': metric_type,
-                    'time_window': date
+            # Query all dates for this category and sum them
+            response = analytics_table.query(
+                KeyConditionExpression='metric_type = :mt',
+                ExpressionAttributeValues={
+                    ':mt': metric_type
                 }
             )
             
-            # Extract the count
-            if 'Item' in response:
-                breakdown['categories'][category] = float(response['Item'].get('event_count', 0))
-            else:
-                breakdown['categories'][category] = 0
+            # Sum all counts across all dates
+            total = sum(float(item.get('event_count', 0)) for item in response.get('Items', []))
+            breakdown['categories'][category] = total
         
         return {
             'success': True,
@@ -182,7 +179,6 @@ def get_category_breakdown(date=None):
             'success': False,
             'message': f'Error: {str(e)}'
         }
-
 
 def lambda_handler(event, context):
     """
